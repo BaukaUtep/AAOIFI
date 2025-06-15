@@ -5,7 +5,6 @@ import json
 import re
 
 from openai import OpenAI
-from telegram import Bot
 from langdetect import detect
 from pinecone import Pinecone       # ← вместо pinecone.init()
 
@@ -23,7 +22,6 @@ TELEGRAM_API       = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # ─── 2. Инициализация клиентов ─────────────────────────────────────────────────
 openai = OpenAI(api_key=OPENAI_API_KEY)
-client = Bot(token=TELEGRAM_TOKEN)
 
 # ← Здесь мы больше НЕ используем pinecone.init()
 pc = Pinecone(
@@ -46,7 +44,7 @@ def send_message(chat_id, text):
 # ─── 4. Логика ответа на вопрос ────────────────────────────────────────────────
 def detect_language(text: str) -> str:
     # Kazakh has some unique letters: ң, ғ, ү, ұ, қ, ә, і
-    if re.search(r"[ңғүұқәіө]", text.lower()):
+    if re.search(r"[ңғүұқәі]", text.lower()):
         return 'kk'
     elif re.search(r"[\u0500-\u052F]", text):  # Cyrillic Supplement
         return 'kk'
@@ -65,7 +63,7 @@ def answer_question(question: str) -> str:
     
     # ── 1) If question is not English, translate to English ─
     if lang != 'en':
-        tran = client.chat.completions.create(
+        tran = openai.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
                 {"role":"system", "content":f"Translate the following into English, preserving meaning and style. Keep all technical terms unchanged:"},
@@ -77,7 +75,7 @@ def answer_question(question: str) -> str:
         eng_question = question
 
     # ── 2) Embedding + Pinecone search (unchanged) ─────────
-    resp = client.embeddings.create(model=EMBED_MODEL, input=eng_question)
+    resp = openai.embeddings.create(model=EMBED_MODEL, input=eng_question)
     q_emb = resp.data[0].embedding
 
     qr = index.query(vector=q_emb, top_k=TOP_K, include_metadata=True)
@@ -108,7 +106,7 @@ def answer_question(question: str) -> str:
             + f"\n\nQuestion: {eng_question}\nAnswer:"
         )
     }
-    chat = client.chat.completions.create(
+    chat = openai.chat.completions.create(
         model=CHAT_MODEL,
         messages=[system, user],
         temperature=0.3,
@@ -118,7 +116,7 @@ def answer_question(question: str) -> str:
 
     # ── 4) If original question wasn't English, translate back ─
     if lang != 'en':
-        tran_back = client.chat.completions.create(
+        tran_back = openai.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
                 {"role":"system","content":f"Translate the following into {lang}, preserving meaning and style. Keep all AAOIFI technical terms in their original English form:"},
