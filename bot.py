@@ -5,6 +5,7 @@ import json
 import re
 
 from openai import OpenAI
+from telegram import Bot
 from langdetect import detect
 from pinecone import Pinecone       # ← вместо pinecone.init()
 
@@ -22,6 +23,7 @@ TELEGRAM_API       = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # ─── 2. Инициализация клиентов ─────────────────────────────────────────────────
 openai = OpenAI(api_key=OPENAI_API_KEY)
+client = Bot(token=TELEGRAM_TOKEN)
 
 # ← Здесь мы больше НЕ используем pinecone.init()
 pc = Pinecone(
