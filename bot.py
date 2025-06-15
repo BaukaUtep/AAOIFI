@@ -42,94 +42,90 @@ def send_message(chat_id, text):
     )
 
 # ─── 4. Логика ответа на вопрос ────────────────────────────────────────────────
-def answer_question(question: str) -> str:
-    # ── 1) Определение языка ───────────────────────────────────────
-    try:
-        detected_lang = detect(question)  # e.g., 'en', 'ru', 'kk', 'ar', 'ur'
-    except:
-        detected_lang = "en"  # fallback
+def detect_language(text: str) -> str:
+    # Kazakh has some unique letters: ң, ғ, ү, ұ, қ, ә, і
+    if re.search(r"[ңғүұқәі]", text.lower()):
+        return 'kk'
+    elif re.search(r"[\u0500-\u052F]", text):  # Cyrillic Supplement
+        return 'kk'
+    elif re.search(r"[\u0600-\u06FF]", text):  # Arabic
+        return 'ar'
+    elif re.search(r"[\u0750-\u077F\uFB50-\uFDFF]", text):  # Arabic Extended / Urdu
+        return 'ur'
+    elif re.search(r"[\u0400-\u04FF]", text):  # General Cyrillic
+        return 'ru'
+    else:
+        return 'en'
 
-    # ── 2) Перевод вопроса на английский, если необходимо ───────────
-    if detected_lang != "en":
-        try:
-            tran = openai.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=[
-                    {"role": "system", "content": "Translate the following into English, preserving meaning and style:"},
-                    {"role": "user", "content": question}
-                ]
-            )
-            eng_question = tran.choices[0].message.content.strip()
-        except Exception as e:
-            return f"Error during translation to English: {e}"
+def answer_question(question: str) -> str:
+    # ── 0) Detect the input language ──────────────────────
+    lang = detect_language(question)
+    
+    # ── 1) If question is not English, translate to English ─
+    if lang != 'en':
+        tran = openai.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role":"system", "content":f"Translate the following into English, preserving meaning and style. Keep all technical terms unchanged:"},
+                {"role":"user",   "content": question}
+            ]
+        )
+        eng_question = tran.choices[0].message.content.strip()
     else:
         eng_question = question
 
-    # ── 3) Получение эмбеддинга и поиск в Pinecone ──────────────────
-    try:
-        resp = openai.embeddings.create(model=EMBED_MODEL, input=eng_question)
-        q_emb = resp.data[0].embedding
-    except Exception as e:
-        return f"Error generating embeddings: {e}"
+    # ── 2) Embedding + Pinecone search (unchanged) ─────────
+    resp = openai.embeddings.create(model=EMBED_MODEL, input=eng_question)
+    q_emb = resp.data[0].embedding
 
-    try:
-        qr = index.query(vector=q_emb, top_k=TOP_K, include_metadata=True)
-        contexts = []
-        for match in qr.matches:
-            md = match.metadata
-            txt = md.get("chunk_text", "")
-            title = md.get("section_title", "")
-            num = md.get("standard_number", "")
-            contexts.append(f"{title} (Std {num}):\n{txt}")
-    except Exception as e:
-        return f"Error querying Pinecone: {e}"
+    qr = index.query(vector=q_emb, top_k=TOP_K, include_metadata=True)
+    contexts = []
+    for match in qr.matches:
+        md    = match.metadata
+        txt   = md.get("chunk_text","")
+        title = md.get("section_title","")
+        num   = md.get("standard_number","")
+        contexts.append(f"{title} (Std {num}):\n{txt}")
 
-    # ── 4) Генерация ответа на английском языке ─────────────────────
-    try:
-        system = {
-            "role": "system",
-            "content": (
-                "You are a knowledgeable AAOIFI standards expert. "
-                "Using only the provided excerpts, compose a coherent and detailed answer "
-                "that explains and synthesizes the relevant sections. "
-                "If the information is incomplete, clearly state what is missing."
-            )
-        }
-        user = {
-            "role": "user",
-            "content": (
-                "Here are the relevant AAOIFI excerpts:\n\n"
-                + "\n---\n".join(contexts)
-                + f"\n\nQuestion: {eng_question}\nAnswer:"
-            )
-        }
-        chat = openai.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[system, user],
-            temperature=0.3,
-            max_tokens=512
+    # ── 3) Generate English answer (unchanged) ─────────────
+    system = {
+        "role":"system",
+        "content":(
+            "You are a knowledgeable AAOIFI standards expert. "
+            "Using only the provided excerpts, compose a coherent and detailed answer "
+            "that explains and synthesizes the relevant sections. "
+            "If the information is incomplete, clearly state what is missing. "
+            "Maintain all technical terms in their original form."
         )
-        eng_answer = chat.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error generating answer: {e}"
+    }
+    user = {
+        "role":"user",
+        "content":(
+            "Here are the relevant AAOIFI excerpts:\n\n"
+            + "\n---\n".join(contexts)
+            + f"\n\nQuestion: {eng_question}\nAnswer:"
+        )
+    }
+    chat = openai.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[system, user],
+        temperature=0.3,
+        max_tokens=512
+    )
+    eng_answer = chat.choices[0].message.content.strip()
 
-    # ── 5) Перевод ответа обратно на исходный язык ──────────────────
-    if detected_lang != "en":
-        try:
-            tran_back = openai.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=[
-                    {"role": "system", "content": f"Translate the following into {detected_lang}, preserving meaning and style:"},
-                    {"role": "user", "content": eng_answer}
-                ]
-            )
-            final_answer = tran_back.choices[0].message.content.strip()
-        except Exception as e:
-            return f"Error translating answer back to original language: {e}"
-    else:
-        final_answer = eng_answer
+    # ── 4) If original question wasn't English, translate back ─
+    if lang != 'en':
+        tran_back = openai.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role":"system","content":f"Translate the following into {lang}, preserving meaning and style. Keep all AAOIFI technical terms in their original English form:"},
+                {"role":"user",  "content": eng_answer}
+            ]
+        )
+        return tran_back.choices[0].message.content.strip()
 
-    return final_answer
+    return eng_answer
 
 # ─── 5. Основной polling-цикл ─────────────────────────────────────────────────
 def main():
