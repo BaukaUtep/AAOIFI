@@ -4,7 +4,7 @@ import requests
 import json
 import re
 
-from openai import OpenAI
+import openai
 from langdetect import detect
 from pinecone import Pinecone       # ← вместо pinecone.init()
 
@@ -42,55 +42,65 @@ def send_message(chat_id, text):
     )
 
 # ─── 4. Логика ответа на вопрос ────────────────────────────────────────────────
+# ── Language detection based on specific Unicode patterns ──
 def detect_language(text: str) -> str:
-    # Kazakh has some unique letters: ң, ғ, ү, ұ, қ, ә, і
     if re.search(r"[ңғүұқәі]", text.lower()):
-        return 'kk'
+        return 'kk'  # Kazakh
     elif re.search(r"[\u0500-\u052F]", text):  # Cyrillic Supplement
         return 'kk'
     elif re.search(r"[\u0600-\u06FF]", text):  # Arabic
         return 'ar'
-    elif re.search(r"[\u0750-\u077F\uFB50-\uFDFF]", text):  # Arabic Extended / Urdu
+    elif re.search(r"[\u0750-\u077F\uFB50-\uFDFF]", text):  # Urdu/Arabic extended
         return 'ur'
-    elif re.search(r"[\u0400-\u04FF]", text):  # General Cyrillic
+    elif re.search(r"[\u0400-\u04FF]", text):  # General Cyrillic (likely Russian)
         return 'ru'
     else:
         return 'en'
 
-def answer_question(question: str) -> str:
-    # ── 0) Detect the input language ──────────────────────
-    lang = detect_language(question)
-    
-    # ── 1) If question is not English, translate to English ─
-    if lang != 'en':
-        tran = openai.chat.completions.create(
+# ── Translation using GPT ──
+def translate_text(text: str, target_lang: str) -> str:
+    try:
+        response = openai.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
-                {"role":"system", "content":f"Translate the following into English, preserving meaning and style. Keep all technical terms unchanged:"},
-                {"role":"user",   "content": question}
-            ]
+                {"role": "system", "content": f"Translate the following text into {target_lang}. Preserve the meaning, style, and any Islamic finance technical terms (like Zakah, Mudarabah, etc.) without changing them."},
+                {"role": "user", "content": text}
+            ],
+            temperature=0,
+            max_tokens=512
         )
-        eng_question = tran.choices[0].message.content.strip()
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"[Translation Error: {str(e)}]"
+
+# ── Main QA Function ──
+def answer_question(question: str) -> str:
+    # 1. Detect original language
+    lang = detect_language(question)
+
+    # 2. Translate question to English if needed
+    if lang != 'en':
+        eng_question = translate_text(question, target_lang='en')
     else:
         eng_question = question
 
-    # ── 2) Embedding + Pinecone search (unchanged) ─────────
+    # 3. Get embedding and search in Pinecone
     resp = openai.embeddings.create(model=EMBED_MODEL, input=eng_question)
     q_emb = resp.data[0].embedding
 
     qr = index.query(vector=q_emb, top_k=TOP_K, include_metadata=True)
     contexts = []
     for match in qr.matches:
-        md    = match.metadata
-        txt   = md.get("chunk_text","")
-        title = md.get("section_title","")
-        num   = md.get("standard_number","")
+        md = match.metadata
+        txt = md.get("chunk_text", "")
+        title = md.get("section_title", "")
+        num = md.get("standard_number", "")
         contexts.append(f"{title} (Std {num}):\n{txt}")
 
-    # ── 3) Generate English answer (unchanged) ─────────────
+    # 4. Generate English answer using only relevant excerpts
     system = {
-        "role":"system",
-        "content":(
+        "role": "system",
+        "content": (
             "You are a knowledgeable AAOIFI standards expert. "
             "Using only the provided excerpts, compose a coherent and detailed answer "
             "that explains and synthesizes the relevant sections. "
@@ -99,8 +109,8 @@ def answer_question(question: str) -> str:
         )
     }
     user = {
-        "role":"user",
-        "content":(
+        "role": "user",
+        "content": (
             "Here are the relevant AAOIFI excerpts:\n\n"
             + "\n---\n".join(contexts)
             + f"\n\nQuestion: {eng_question}\nAnswer:"
@@ -114,18 +124,13 @@ def answer_question(question: str) -> str:
     )
     eng_answer = chat.choices[0].message.content.strip()
 
-    # ── 4) If original question wasn't English, translate back ─
+    # 5. Translate back into original language if needed
     if lang != 'en':
-        tran_back = openai.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {"role":"system","content":f"Translate the following into {lang}, preserving meaning and style. Keep all AAOIFI technical terms in their original English form:"},
-                {"role":"user",  "content": eng_answer}
-            ]
-        )
-        return tran_back.choices[0].message.content.strip()
+        final_answer = translate_text(eng_answer, target_lang=lang)
+    else:
+        final_answer = eng_answer
 
-    return eng_answer
+    return final_answer
 
 # ─── 5. Основной polling-цикл ─────────────────────────────────────────────────
 def main():
