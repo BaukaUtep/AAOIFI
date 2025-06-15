@@ -4,7 +4,7 @@ import requests
 import json
 import re
 
-import openai
+from openai import OpenAI
 from langdetect import detect
 from pinecone import Pinecone       # ← вместо pinecone.init()
 
@@ -60,7 +60,7 @@ def detect_language(text: str) -> str:
 # ── Translation using GPT ──
 def translate_text(text: str, target_lang: str) -> str:
     try:
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
                 {"role": "system", "content": f"Translate the following text into {target_lang}. Preserve the meaning, style, and any Islamic finance technical terms (like Zakah, Mudarabah, etc.) without changing them."},
@@ -85,7 +85,7 @@ def answer_question(question: str) -> str:
         eng_question = question
 
     # 3. Get embedding and search in Pinecone
-    resp = openai.embeddings.create(model=EMBED_MODEL, input=eng_question)
+    resp = client.embeddings.create(model=EMBED_MODEL, input=eng_question)
     q_emb = resp.data[0].embedding
 
     qr = index.query(vector=q_emb, top_k=TOP_K, include_metadata=True)
@@ -116,7 +116,7 @@ def answer_question(question: str) -> str:
             + f"\n\nQuestion: {eng_question}\nAnswer:"
         )
     }
-    chat = openai.chat.completions.create(
+    chat = client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[system, user],
         temperature=0.3,
