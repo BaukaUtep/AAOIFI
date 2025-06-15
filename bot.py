@@ -43,74 +43,93 @@ def send_message(chat_id, text):
 
 # ─── 4. Логика ответа на вопрос ────────────────────────────────────────────────
 def answer_question(question: str) -> str:
-    # ── 0) Проверяем, есть ли в вопросе кириллица ──────────────────────
-    is_cyrillic = bool(re.search(r"[\u0400-\u04FF]", question))
+    # ── 1) Определение языка ───────────────────────────────────────
+    try:
+        detected_lang = detect(question)  # e.g., 'en', 'ru', 'kk', 'ar', 'ur'
+    except:
+        detected_lang = "en"  # fallback
 
-    # ── 1) Если вопрос на кириллице, переводим его на английский ───────
-    if is_cyrillic:
-        tran = openai.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {"role":"system", "content":"Translate the following into English, preserving meaning and style:"},
-                {"role":"user",   "content": question}
-            ]
-        )
-        eng_question = tran.choices[0].message.content.strip()
+    # ── 2) Перевод вопроса на английский, если необходимо ───────────
+    if detected_lang != "en":
+        try:
+            tran = openai.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=[
+                    {"role": "system", "content": "Translate the following into English, preserving meaning and style:"},
+                    {"role": "user", "content": question}
+                ]
+            )
+            eng_question = tran.choices[0].message.content.strip()
+        except Exception as e:
+            return f"Error during translation to English: {e}"
     else:
         eng_question = question
 
-    # ── 2) Embedding + поиск в Pinecone ───────────────────────────────
-    resp = openai.embeddings.create(model=EMBED_MODEL, input=eng_question)
-    q_emb = resp.data[0].embedding
+    # ── 3) Получение эмбеддинга и поиск в Pinecone ──────────────────
+    try:
+        resp = openai.embeddings.create(model=EMBED_MODEL, input=eng_question)
+        q_emb = resp.data[0].embedding
+    except Exception as e:
+        return f"Error generating embeddings: {e}"
 
-    qr = index.query(vector=q_emb, top_k=TOP_K, include_metadata=True)
-    contexts = []
-    for match in qr.matches:
-        md    = match.metadata
-        txt   = md.get("chunk_text","")
-        title = md.get("section_title","")
-        num   = md.get("standard_number","")
-        contexts.append(f"{title} (Std {num}):\n{txt}")
+    try:
+        qr = index.query(vector=q_emb, top_k=TOP_K, include_metadata=True)
+        contexts = []
+        for match in qr.matches:
+            md = match.metadata
+            txt = md.get("chunk_text", "")
+            title = md.get("section_title", "")
+            num = md.get("standard_number", "")
+            contexts.append(f"{title} (Std {num}):\n{txt}")
+    except Exception as e:
+        return f"Error querying Pinecone: {e}"
 
-    # ── 3) Генерация ответа на английском ───────────────────────────────
-    system = {
-        "role":"system",
-        "content":(
-            "You are a knowledgeable AAOIFI standards expert. "
-            "Using only the provided excerpts, compose a coherent and detailed answer "
-            "that explains and synthesizes the relevant sections. "
-            "If the information is incomplete, clearly state what is missing."
-        )
-    }
-    user = {
-        "role":"user",
-        "content":(
-            "Here are the relevant AAOIFI excerpts:\n\n"
-            + "\n---\n".join(contexts)
-            + f"\n\nQuestion: {eng_question}\nAnswer:"
-        )
-    }
-    chat = openai.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[system, user],
-        temperature=0.3,
-        max_tokens=512
-    )
-    eng_answer = chat.choices[0].message.content.strip()
-
-    # ── 4) Если изначальный вопрос был на кириллице, переводим ответ обратно ─
-    if is_cyrillic:
-        tran_back = openai.chat.completions.create(
+    # ── 4) Генерация ответа на английском языке ─────────────────────
+    try:
+        system = {
+            "role": "system",
+            "content": (
+                "You are a knowledgeable AAOIFI standards expert. "
+                "Using only the provided excerpts, compose a coherent and detailed answer "
+                "that explains and synthesizes the relevant sections. "
+                "If the information is incomplete, clearly state what is missing."
+            )
+        }
+        user = {
+            "role": "user",
+            "content": (
+                "Here are the relevant AAOIFI excerpts:\n\n"
+                + "\n---\n".join(contexts)
+                + f"\n\nQuestion: {eng_question}\nAnswer:"
+            )
+        }
+        chat = openai.chat.completions.create(
             model=CHAT_MODEL,
-            messages=[
-                {"role":"system","content":"Translate the following into Russian, preserving meaning and style:"},
-                {"role":"user",  "content": eng_answer}
-            ]
+            messages=[system, user],
+            temperature=0.3,
+            max_tokens=512
         )
-        return tran_back.choices[0].message.content.strip()
+        eng_answer = chat.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error generating answer: {e}"
 
-    # ── 5) Иначе — возвращаем ответ на английском ─────────────────────────
-    return eng_answer
+    # ── 5) Перевод ответа обратно на исходный язык ──────────────────
+    if detected_lang != "en":
+        try:
+            tran_back = openai.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=[
+                    {"role": "system", "content": f"Translate the following into {detected_lang}, preserving meaning and style:"},
+                    {"role": "user", "content": eng_answer}
+                ]
+            )
+            final_answer = tran_back.choices[0].message.content.strip()
+        except Exception as e:
+            return f"Error translating answer back to original language: {e}"
+    else:
+        final_answer = eng_answer
+
+    return final_answer
 
 # ─── 5. Основной polling-цикл ─────────────────────────────────────────────────
 def main():
